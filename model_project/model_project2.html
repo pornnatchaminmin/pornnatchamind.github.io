@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Assignment 3 - PBR Room with Image Picking</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background-color: #1a1a1a;
+      }
+      #info {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        color: white;
+        font-family: sans-serif;
+        background: rgba(0, 0, 0, 0.75);
+        padding: 10px 14px;
+        border-radius: 6px;
+        pointer-events: none;
+        z-index: 99;
+        line-height: 1.5;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">คลิกที่รูปภาพในห้องเพื่อดูผลงาน Portfolio</div>
+
+    <script type="module">
+      import * as THREE from 'three';
+      import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+      import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+      import { EXRLoader } from 'three/addons/loaders/EXRLoader.js';
+      import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+
+      // 1. SETUP SCENE, CAMERA, RENDERER
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x2a2a2a);
+
+      const camera = new THREE.PerspectiveCamera(
+        60,
+        window.innerWidth / window.innerHeight,
+        0.01,
+        2000
+      );
+      camera.position.set(0, 5, 10);
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.2;
+      renderer.shadowMap.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+
+      // 2. แสงสว่าง
+      const ambientLight = new THREE.AmbientLight(0xffffff, 1.2);
+      scene.add(ambientLight);
+
+      const dirLight = new THREE.DirectionalLight(0xffffff, 2.0);
+      dirLight.position.set(10, 20, 15);
+      dirLight.castShadow = true;
+      scene.add(dirLight);
+
+      const pointLight = new THREE.PointLight(0xffffff, 50, 100);
+      pointLight.position.set(0, 5, 0);
+      pointLight.castShadow = true;
+      scene.add(pointLight);
+
+      const lightHelper = new THREE.Mesh(
+        new THREE.SphereGeometry(0.15, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0xffff00 })
+      );
+      pointLight.add(lightHelper);
+
+      // 3. ระบบ RAYCASTER (PICKING)
+      const raycaster = new THREE.Raycaster();
+      const pointer = new THREE.Vector2();
+      const pickables = [];
+      let pickedObject = null;
+
+      // Uniforms สำหรับ Vertex Shader ของ water.glb
+      const waterUniforms = {
+        uTime: { value: 0.0 }
+      };
+
+      window.addEventListener('click', (event) => {
+        pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
+        pointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+        raycaster.setFromCamera(pointer, camera);
+        const intersects = raycaster.intersectObjects(pickables, true);
+
+        const infoBox = document.getElementById('info');
+
+        if (intersects.length > 0) {
+          pickedObject = intersects[0].object;
+
+          if (infoBox && pickedObject.userData.title) {
+            infoBox.innerHTML = `
+              <strong>${pickedObject.userData.title}</strong><br>
+              ไฟล์: ${pickedObject.userData.file}<br>
+              <span style="font-size:12px; color:#aaa;">(คลิกที่ว่างเพื่อซูมออก)</span>
+            `;
+          }
+        } else {
+          pickedObject = null;
+          if (infoBox) {
+            infoBox.innerText = 'คลิกที่รูปภาพในห้องเพื่อดูผลงานและซูมเข้าใกล้';
+          }
+        }
+      });
+
+      // 4. โหลดโมเดลห้อง
+      const loader = new GLTFLoader();
+      const baseUrl = 'https://pornnatchamind.github.io/project/model_project/';
+
+      loader.load(
+        baseUrl + 'work_model_3.glb',
+        (gltf) => {
+          console.log('โมเดลห้องโหลดสำเร็จ!');
+          const roomModel = gltf.scene;
+
+          roomModel.traverse((child) => {
+            if (child.isMesh) {
+              child.castShadow = true;
+              child.receiveShadow = true;
+            }
+          });
+
+          scene.add(roomModel);
+
+          const box = new THREE.Box3().setFromObject(roomModel);
+          const center = box.getCenter(new THREE.Vector3());
+          const size = box.getSize(new THREE.Vector3());
+          const maxDim = Math.max(size.x, size.y, size.z);
+          const fov = camera.fov * (Math.PI / 180);
+          let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2)) * 1.5;
+
+          camera.position.set(center.x + cameraZ, center.y + cameraZ * 0.8, center.z + cameraZ);
+          camera.lookAt(center);
+          controls.target.copy(center);
+          controls.update();
+        },
+        undefined,
+        (error) => {
+          console.error('เกิดข้อผิดพลาดในการโหลดโมเดลห้อง:', error);
+        }
+      );
+
+      function createCelGradientMap() {
+        const colors = new Uint8Array([
+          60,   // เงาเข้ม
+          160,  // เงากลาง
+          255   // ส่วนสว่าง
+        ]);
+        const format = THREE.RedFormat;
+        const gradientMap = new THREE.DataTexture(colors, colors.length, 1, format);
+        gradientMap.needsUpdate = true;
+        gradientMap.minFilter = THREE.NearestFilter;
+        gradientMap.magFilter = THREE.NearestFilter;
+        return gradientMap;
+      }
+
+      const celGradientMap = createCelGradientMap();
+
+      // โหลด book.glb พร้อมแปลง Material เป็น Cel Shading (MeshToonMaterial)
+      loader.load(
+        baseUrl + 'book.glb',
+        (gltf) => {
+          const bookModel = gltf.scene;
+          bookModel.traverse((child) => {
+            if (child.isMesh) {
+              child.castShadow = true;
+              child.receiveShadow = true;
+
+              // แปลง Material เดิมของหนังสือให้เป็น Toon Material
+              const oldMat = child.material;
+              child.material = new THREE.MeshToonMaterial({
+                color: oldMat.color ? oldMat.color : 0xffffff,
+                map: oldMat.map || null,                 // คง Texture ลวดลายเดิมของหนังสือไว้
+                normalMap: oldMat.normalMap || null,
+                gradientMap: celGradientMap,            // ใส่ Step แสงเงาแบบ Cel Shading
+              });
+            }
+          });
+          scene.add(bookModel);
+        },
+        undefined,
+        (err) => console.warn('โหลด book.glb ไม่สำเร็จ:', err)
+      );
+
+      // โหลด k.glb
+      loader.load(
+        baseUrl + 'k.glb',
+        (gltf) => {
+          const kModel = gltf.scene;
+          kModel.traverse((child) => {
+            if (child.isMesh) {
+              child.castShadow = true;
+              child.receiveShadow = true;
+            }
+          });
+          scene.add(kModel);
+        },
+        undefined,
+        (err) => console.warn('โหลด k.glb ไม่สำเร็จ:', err)
+      );
+
+      loader.load(
+        baseUrl + 'water.glb',
+        (gltf) => {
+          const waterModel = gltf.scene;
+
+          waterModel.traverse((child) => {
+            if (child.isMesh) {
+              child.castShadow = true;
+              child.receiveShadow = true;
+
+              // โคลน Material เพื่อป้องกันการกระทบโมเดลอื่น
+              child.material = child.material.clone();
+
+              child.material.onBeforeCompile = (shader) => {
+                // ผูก Uniform เวลาเข้ากับ Shader
+                shader.uniforms.uTime = waterUniforms.uTime;
+
+                // 1. ประกาศตัวแปร uniform uTime
+                shader.vertexShader = `
+                  uniform float uTime;
+                ` + shader.vertexShader;
+
+                // 2. ปรับตำแหน่งแกน Y ด้วยคลื่น Sine + Cosine Wave
+                shader.vertexShader = shader.vertexShader.replace(
+                  '#include <begin_vertex>',
+                  `
+                  #include <begin_vertex>
+                  transformed.y += sin(transformed.x * 4.0 + uTime * 2.0) * 0.08
+                                 + cos(transformed.z * 3.0 + uTime * 1.5) * 0.05;
+                  `
+                );
+              };
+            }
+          });
+
+          scene.add(waterModel);
+        },
+        undefined,
+        (err) => console.warn('โหลด water.glb ไม่สำเร็จ:', err)
+      );
+
+      // 5. โหลดเฉพาะโมเดลรูปภาพ IMAGE*.GLB เพื่อให้คลิกได้
+      const imageFiles = [
+        'image1.glb',
+        'image2.glb',
+        'image3.glb',
+        'image4glb.glb',
+        'image5glb.glb',
+        'image6.glb',
+        'text.glb'
+      ];
+
+      imageFiles.forEach((fileName, index) => {
+        loader.load(
+          baseUrl + fileName,
+          (gltf) => {
+            const imgModel = gltf.scene;
+
+            imgModel.traverse((child) => {
+              if (child.isMesh) {
+                child.castShadow = true;
+                child.receiveShadow = true;
+
+                child.userData = {
+                  title: `ผลงานชิ้นที่ ${index + 1}`,
+                  file: fileName
+                };
+
+                pickables.push(child);
+              }
+            });
+
+            scene.add(imgModel);
+          },
+          undefined,
+          (err) => console.error(`โหลดไฟล์ ${fileName} ไม่สำเร็จ:`, err)
+        );
+      });
+
+      // 6. โหลด EXR ท้องฟ้า
+      const exrSkyboxUrl = 'https://raw.githubusercontent.com/pornnatchaMind/pornnatchaMind.github.io/main/model%20work2/cowboy_town_saloon_1k.exr';
+      const pmremGenerator = new THREE.PMREMGenerator(renderer);
+      pmremGenerator.compileEquirectangularShader();
+
+      new EXRLoader()
+        .setDataType(THREE.HalfFloatType)
+        .load(
+          exrSkyboxUrl,
+          (texture) => {
+            const skybox = pmremGenerator.fromEquirectangular(texture).texture;
+            scene.background = skybox;
+            scene.environment = skybox;
+            texture.dispose();
+            pmremGenerator.dispose();
+          },
+          undefined,
+          (err) => console.warn('โหลด EXR ไม่สำเร็จ ใช้พื้นหลังสีเทาแทน:', err)
+        );
+
+      // 7. GUI CONTROLS
+      const gui = new GUI({ title: 'PBR & Light Control' });
+      const lightFolder = gui.addFolder('Point Light');
+      lightFolder.add(pointLight.position, 'x', -10, 10, 0.1);
+      lightFolder.add(pointLight.position, 'y', 0, 15, 0.1);
+      lightFolder.add(pointLight.position, 'z', -10, 10, 0.1);
+      lightFolder.add(pointLight, 'intensity', 0, 300, 1).name('Intensity');
+
+      // 8. ANIMATE & RESIZE
+      function animate(time) {
+        requestAnimationFrame(animate);
+
+        // อัปเดตเวลาเข้า Shader ผิวน้ำ (แปลงมิลลิวินาทีเป็นวินาที)
+        waterUniforms.uTime.value = time * 0.001;
+
+        // เมื่อคลิกที่รูป กล้องจะค่อยๆ เลื่อนเข้าหาภาพ
+        if (pickedObject) {
+          const targetPos = new THREE.Vector3();
+          pickedObject.getWorldPosition(targetPos);
+
+          controls.target.lerp(targetPos, 0.05);
+
+          const forward = new THREE.Vector3(2, 2, 1.5);
+          forward.applyQuaternion(pickedObject.quaternion);
+
+          const desiredCameraPos = targetPos.clone().add(forward);
+          camera.position.lerp(desiredCameraPos, 0.05);
+        }
+
+        controls.update();
+        renderer.render(scene, camera);
+      }
+
+      requestAnimationFrame(animate);
+
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>

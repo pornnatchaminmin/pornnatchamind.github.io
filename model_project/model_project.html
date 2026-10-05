@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Assignment 3 - PBR Room Model</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background-color: #1a1a1a;
+      }
+      #info {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        color: white;
+        font-family: sans-serif;
+        background: rgba(0, 0, 0, 0.7);
+        padding: 8px 12px;
+        border-radius: 4px;
+        pointer-events: none;
+        z-index: 99;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="info">Assignment #3: Next Gen Rendering (PBR Shader)</div>
+
+    <script type="module">
+      import * as THREE from 'three';
+      import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+      import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+      import { EXRLoader } from 'three/addons/loaders/EXRLoader.js';
+      import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+
+      // 1. SETUP SCENE, CAMERA, RENDERER
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x2a2a2a);
+
+      const camera = new THREE.PerspectiveCamera(
+        60,
+        window.innerWidth / window.innerHeight,
+        0.01,
+        2000
+      );
+      camera.position.set(0, 5, 10);
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.2;
+      renderer.shadowMap.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+
+      // 2. แสงสว่าง
+      const ambientLight = new THREE.AmbientLight(0xffffff, 1.2);
+      scene.add(ambientLight);
+
+      const dirLight = new THREE.DirectionalLight(0xffffff, 2.0);
+      dirLight.position.set(10, 20, 15);
+      dirLight.castShadow = true;
+      scene.add(dirLight);
+
+      const pointLight = new THREE.PointLight(0xffffff, 50, 100);
+      pointLight.position.set(0, 5, 0);
+      pointLight.castShadow = true;
+      scene.add(pointLight);
+      
+      const lightHelper = new THREE.Mesh(
+        new THREE.SphereGeometry(0.15, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0xffff00 })
+      );
+      pointLight.add(lightHelper);
+
+      // 3. โหลดโมเดลห้อง work_model1.glb (ใช้ Direct URL จาก GitHub Raw)
+      const loader = new GLTFLoader();
+      const modelUrl = 'https://pornnatchamind.github.io/project/model_project/';
+      loader.load(
+        modelUrl + 'moldel3.glb',
+        (gltf) => {
+          console.log('โมเดลโหลดสำเร็จ!');
+          const roomModel = gltf.scene;
+
+          roomModel.traverse((child) => {
+            if (child.isMesh) {
+              child.castShadow = true;
+              child.receiveShadow = true;
+            }
+          });
+
+          scene.add(roomModel);
+
+          // ซูมและจัดระยะกล้องเข้าหาห้องอัตโนมัติ
+          const box = new THREE.Box3().setFromObject(roomModel);
+          const center = box.getCenter(new THREE.Vector3());
+          const size = box.getSize(new THREE.Vector3());
+          const maxDim = Math.max(size.x, size.y, size.z);
+          const fov = camera.fov * (Math.PI / 180);
+          let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2)) * 1.5;
+
+          camera.position.set(center.x + cameraZ, center.y + cameraZ * 0.8, center.z + cameraZ);
+          camera.lookAt(center);
+          controls.target.copy(center);
+          controls.update();
+        },
+        (xhr) => {
+          console.log((xhr.loaded / (xhr.total || 1) * 100).toFixed(0) + '% model loaded');
+        },
+        (error) => {
+          console.error('เกิดข้อผิดพลาดในการโหลดโมเดล:', error);
+        }
+      );
+
+      // 4. พยายามโหลด EXR ท้องฟ้าแยกต่างหาก (ถ้าโหลดไม่ผ่าน โมเดลห้องก็ยังแสดงได้ปกติ)
+      const exrSkyboxUrl = 'https://raw.githubusercontent.com/pornnatchaMind/pornnatchaMind.github.io/main/model%20work2/cowboy_town_saloon_1k.exr';
+      const pmremGenerator = new THREE.PMREMGenerator(renderer);
+      pmremGenerator.compileEquirectangularShader();
+
+      new EXRLoader()
+        .setDataType(THREE.HalfFloatType)
+        .load(
+          exrSkyboxUrl,
+          (texture) => {
+            const skybox = pmremGenerator.fromEquirectangular(texture).texture;
+            scene.background = skybox;
+            scene.environment = skybox;
+            texture.dispose();
+            pmremGenerator.dispose();
+          },
+          undefined,
+          (err) => console.warn('โหลด EXR ไม่สำเร็จ ใช้พื้นหลังสีเทาแทน:', err)
+        );
+
+      // 5. GUI CONTROLS
+      const gui = new GUI({ title: 'PBR & Light Control' });
+      const lightFolder = gui.addFolder('Point Light');
+      lightFolder.add(pointLight.position, 'x', -10, 10, 0.1);
+      lightFolder.add(pointLight.position, 'y', 0, 15, 0.1);
+      lightFolder.add(pointLight.position, 'z', -10, 10, 0.1);
+      lightFolder.add(pointLight, 'intensity', 0, 300, 1).name('Intensity');
+
+      // 6. ANIMATE & RESIZE
+      function animate() {
+        requestAnimationFrame(animate);
+        controls.update();
+        renderer.render(scene, camera);
+      }
+      animate();
+
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>

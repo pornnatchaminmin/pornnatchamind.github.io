@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Assignment 3 - PBR Room Model</title>
+<style>
+body{margin:0;overflow:hidden;background-color:#1a1a1a}
+#info{position:absolute;top:10px;left:10px;color:white;font-family:sans-serif;background:rgba(0,0,0,.7);padding:8px 12px;border-radius:4px;pointer-events:none;z-index:99;font-size:24px}
+</style>
+<script type="importmap">
+{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}
+</script>
+</head>
+
+<body>
+<div id="info">Assignment #3: Next Gen Rendering (PBR Shader + Cel Shading)</div>
+
+<script type="module">
+
+// =========================================================
+// 1. IMPORT
+// =========================================================
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+import {EXRLoader} from 'three/addons/loaders/EXRLoader.js';
+import {GUI} from 'three/addons/libs/lil-gui.module.min.js';
+
+// =========================================================
+// 2. SCENE
+// =========================================================
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x333333);
+
+// =========================================================
+// 3. CAMERA
+// =========================================================
+const camera=new THREE.PerspectiveCamera(60,window.innerWidth/window.innerHeight,.01,2000);
+camera.position.set(0,5,10);
+
+// =========================================================
+// 4. RENDERER
+// =========================================================
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(window.innerWidth,window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+renderer.toneMapping=THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure=1.2;
+renderer.shadowMap.enabled=true;
+renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+document.body.appendChild(renderer.domElement);
+
+// =========================================================
+// 5. ORBIT CONTROLS
+// =========================================================
+const controls=new OrbitControls(camera,renderer.domElement);
+controls.target.set(0,1.5,0);
+controls.enableDamping=true;
+
+// =========================================================
+// 6. MAIN GROUP
+// =========================================================
+const mainGroup=new THREE.Group();
+scene.add(mainGroup);
+
+// =========================================================
+// 7. PICKING
+// =========================================================
+const pickables=[];
+const raycaster=new THREE.Raycaster();
+const pointer=new THREE.Vector2();
+let targetFocusPosition=null;
+let targetCameraPosition=null;
+let selectedObject=null;
+let isPickingZoom=false;
+
+function getPickRoot(object){
+  let current=object;
+  while(current.parent&&current.parent!==mainGroup) current=current.parent;
+  return current;
+}
+
+renderer.domElement.addEventListener('click',onPick);
+
+function onPick(e){
+  const rect=renderer.domElement.getBoundingClientRect();
+  const x=e.clientX-rect.left;
+  const y=e.clientY-rect.top;
+  pointer.x=(x/rect.width)*2-1;
+  pointer.y=-(y/rect.height)*2+1;
+  raycaster.setFromCamera(pointer,camera);
+  const intersects=raycaster.intersectObjects(pickables,true);
+
+  if(isPickingZoom){
+    if(intersects.length>0){
+      const clickedRoot=getPickRoot(intersects[0].object);
+      if(clickedRoot!==selectedObject){
+        console.log('กด Model อื่น -> ยกเลิก Picking แต่ค้างตำแหน่ง Zoom');
+        selectedObject=null;
+        isPickingZoom=false;
+        targetCameraPosition=null;
+        targetFocusPosition=null;
+        controls.enabled=true;
+        return;
+      }
+      console.log('กด Model เดิม -> ยัง Zoom อยู่');
+      return;
+    }
+
+    console.log('กดพื้นที่ว่าง -> ยกเลิก Picking แต่ค้างตำแหน่ง Zoom');
+    selectedObject=null;
+    isPickingZoom=false;
+    targetCameraPosition=null;
+    targetFocusPosition=null;
+    controls.enabled=true;
+    return;
+  }
+
+  if(intersects.length>0){
+    const clickedRoot=getPickRoot(intersects[0].object);
+    console.log('Picked object:',clickedRoot.name);
+    selectedObject=clickedRoot;
+
+    const box=new THREE.Box3().setFromObject(clickedRoot);
+    const center=box.getCenter(new THREE.Vector3());
+    const size=box.getSize(new THREE.Vector3());
+    const maxSize=Math.max(size.x,size.y,size.z);
+
+    targetFocusPosition=center.clone();
+
+    const zoomDistance=Math.max(maxSize*2.5,2.0);
+    const direction=camera.position.clone().sub(center).normalize();
+
+    targetCameraPosition=center.clone().add(direction.multiplyScalar(zoomDistance));
+    isPickingZoom=true;
+    controls.enabled=true;
+
+    console.log('Zoom to:',targetCameraPosition);
+  }
+}
+
+// =========================================================
+// 8. CEL SHADING SETTINGS
+// =========================================================
+const celSettings={
+  levels:4,
+  ambient:.25,
+  intensity:1.0
+};
+
+const celMaterials=[];
+
+// =========================================================
+// 9. CEL SHADING
+// =========================================================
+function applyCelShading(material){
+  if(!material)return;
+  if(!material.isMeshStandardMaterial&&!material.isMeshPhysicalMaterial)return;
+
+  material.onBeforeCompile=function(shader){
+    shader.uniforms.uCelLevels={value:celSettings.levels};
+    shader.uniforms.uCelIntensity={value:celSettings.intensity};
+    shader.uniforms.uCelAmbient={value:celSettings.ambient};
+
+    shader.fragmentShader=shader.fragmentShader.replace(
+      '#include <output_fragment>',
+      `
+      float celBrightness=dot(outgoingLight,vec3(0.299,0.587,0.114));
+      celBrightness=clamp(celBrightness,0.0,1.0);
+
+      float celLevel=floor(celBrightness*uCelLevels)/uCelLevels;
+      celLevel=max(celLevel,uCelAmbient);
+
+      vec3 celColor=outgoingLight*(
+        mix(
+          1.0,
+          celLevel/max(celBrightness,0.001),
+          uCelIntensity
+        )
+      );
+
+      outgoingLight=celColor;
+
+      #include <output_fragment>
+      `
+    );
+
+    material.userData.celShader=shader;
+  };
+
+  material.needsUpdate=true;
+  celMaterials.push(material);
+}
+
+function applyCelToModel(model){
+  if(!model)return;
+
+  model.traverse(function(child){
+    if(!child.isMesh)return;
+
+    child.castShadow=true;
+    child.receiveShadow=true;
+
+    const materials=Array.isArray(child.material)?child.material:[child.material];
+
+    materials.forEach(function(material){
+      applyCelShading(material);
+    });
+  });
+}
+
+// =========================================================
+// 10. LIGHT
+// =========================================================
+const ambientLight=new THREE.AmbientLight(0xffffff,2.5);
+scene.add(ambientLight);
+
+const dirLight=new THREE.DirectionalLight(0xffffff,2.0);
+dirLight.position.set(5,10,7);
+dirLight.castShadow=true;
+scene.add(dirLight);
+
+const pointLight=new THREE.PointLight(0xffffff,80,50);
+pointLight.position.set(0,3,0);
+pointLight.castShadow=true;
+scene.add(pointLight);
+
+// =========================================================
+// 11. GLTF LOADER
+// =========================================================
+const loader=new GLTFLoader();
+
+const BASE_URL='https://cdn.jsdelivr.net/gh/pornnatchaMind/pornnatchaMind.github.io@main/project/model_project/';
+
+// =========================================================
+// 12. ANIMATION VARIABLES
+// =========================================================
+function lerp(a,b,t){
+  return a+(b-a)*t;
+}
+
+let door1=null;
+let door1StartX=0;
+
+let fish1=null;
+let fish1StartX=0;
+
+let fish3=null;
+let fish3StartX=0;
+
+let fish4=null;
+let fish4StartX=0;
+
+let book=null;
+let bookStartX=0;
+
+let homeModel=null;
+let water=null;
+let waterShaderUniforms=[];
+
+// =========================================================
+// 13. LOAD ROOM - moldel3.glb
+// =========================================================
+loader.load(
+  BASE_URL+'moldel3.glb',
+  function(gltf){
+    console.log('moldel3.glb โหลดสำเร็จ!');
+
+    const room=gltf.scene;
+
+    // ROOM = CEL SHADING
+    applyCelToModel(room);
+
+    mainGroup.add(room);
+
+    const box=new THREE.Box3().setFromObject(room);
+    const center=box.getCenter(new THREE.Vector3());
+    const size=box.getSize(new THREE.Vector3());
+
+    console.log('Room center:',center);
+    console.log('Room size:',size);
+
+    controls.target.copy(center);
+
+    const maxSize=Math.max(size.x,size.y,size.z);
+
+    camera.position.set(
+      center.x+maxSize*1.2,
+      center.y+maxSize*.7,
+      center.z+maxSize*1.2
+    );
+
+    camera.lookAt(center);
+    controls.update();
+  },
+  undefined,
+  function(error){
+    console.error('โหลด moldel3.glb ไม่สำเร็จ:',error);
+  }
+);
+
+// =========================================================
+// 14. LOAD TEXT - Taxt2.glb
+// =========================================================
+loader.load(
+  BASE_URL+'Taxt2.glb',
+  function(gltf){
+    console.log('Taxt2.glb โหลดสำเร็จ!');
+
+    const textModel=gltf.scene;
+
+    // TEXT = CEL SHADING
+    applyCelToModel(textModel);
+
+    mainGroup.add(textModel);
+  },
+  undefined,
+  function(error){
+    console.error('โหลด Taxt2.glb ไม่สำเร็จ:',error);
+  }
+);
+
+// =========================================================
+// 15. LOAD IMAGE MODELS
+// =========================================================
+const imageFiles=[
+  {name:'image1',file:'image1.glb'},
+  {name:'image2',file:'image2.glb'},
+  {name:'image3',file:'image3.glb'},
+  {name:'image4',file:'image4glb.glb'},
+  {name:'image5',file:'image5glb.glb'},
+  {name:'image6',file:'image6.glb'},
+  {name:'P',file:'P.glb'},
+  {name:'text',file:'text.glb'}
+];
+
+imageFiles.forEach(function(item){
+  loader.load(
+    BASE_URL+item.file,
+    function(gltf){
+      console.log(item.file+' โหลดสำเร็จ!');
+
+      const imgModel=gltf.scene;
+      imgModel.name=item.name;
+
+      // IMAGE = CEL SHADING
+      applyCelToModel(imgModel);
+
+      imgModel.traverse(function(child){
+        if(child.isMesh){
+          child.name=item.name;
+          pickables.push(child);
+        }
+      });
+
+      mainGroup.add(imgModel);
+    },
+    undefined,
+    function(error){
+      console.error('โหลด '+item.file+' ไม่สำเร็จ:',error);
+    }
+  );
+});
+
+// =========================================================
+// 16. LOAD DOOR - door1.glb
+// =========================================================
+loader.load(
+  BASE_URL+'door1.glb',
+  function(gltf){
+    console.log('door1.glb โหลดสำเร็จ!');
+
+    door1=gltf.scene;
+    door1StartX=door1.position.x;
+
+    // DOOR = CEL SHADING
+    applyCelToModel(door1);
+
+    mainGroup.add(door1);
+  },
+  undefined,
+  function(error){
+    console.error('โหลด door1.glb ไม่สำเร็จ:',error);
+  }
+);
+
+// =========================================================
+// 17. LOAD WATER - CEL SHADING + VERTEX SHADER
+// =========================================================
+loader.load(
+  BASE_URL+'water.glb',
+  function(gltf){
+    console.log('water.glb โหลดสำเร็จ!');
+
+    water=gltf.scene;
+
+    water.traverse(function(child){
+      if(!child.isMesh)return;
+
+      child.castShadow=true;
+      child.receiveShadow=true;
+
+      pickables.push(child);
+
+      const materials=Array.isArray(child.material)?child.material:[child.material];
+
+      materials.forEach(function(material){
+        if(!material)return;
+
+        if(material.isMeshStandardMaterial||material.isMeshPhysicalMaterial){
+
+          material.onBeforeCompile=function(shader){
+
+            // CEL UNIFORMS
+            shader.uniforms.uCelLevels={value:celSettings.levels};
+            shader.uniforms.uCelIntensity={value:celSettings.intensity};
+            shader.uniforms.uCelAmbient={value:celSettings.ambient};
+
+            // WATER TIME
+            shader.uniforms.uTime={value:0};
+            waterShaderUniforms.push(shader.uniforms.uTime);
+
+            // VERTEX SHADER
+            shader.vertexShader='uniform float uTime;\n'+shader.vertexShader;
+
+            shader.vertexShader=shader.vertexShader.replace(
+              '#include <begin_vertex>',
+              `
+              #include <begin_vertex>
+
+              float wave1=sin(transformed.x*4.0+uTime*2.0);
+              float wave2=cos(transformed.z*5.0+uTime*1.5);
+              float wave=(wave1+wave2)*0.08;
+
+              transformed.y+=wave;
+              `
+            );
+
+            // CEL SHADING
+            shader.fragmentShader=shader.fragmentShader.replace(
+              '#include <output_fragment>',
+              `
+              float celBrightness=dot(outgoingLight,vec3(0.299,0.587,0.114));
+              celBrightness=clamp(celBrightness,0.0,1.0);
+
+              float celLevel=floor(celBrightness*uCelLevels)/uCelLevels;
+              celLevel=max(celLevel,uCelAmbient);
+
+              vec3 celColor=outgoingLight*(
+                mix(
+                  1.0,
+                  celLevel/max(celBrightness,0.001),
+                  uCelIntensity
+                )
+              );
+
+              outgoingLight=celColor;
+
+              #include <output_fragment>
+              `
+            );
+
+            material.userData.celShader=shader;
+          };
+
+          material.needsUpdate=true;
+          celMaterials.push(material);
+        }
+      });
+    });
+
+    mainGroup.add(water);
+  },
+  undefined,
+  function(error){
+    console.error('โหลด water.glb ไม่สำเร็จ:',error);
+  }
+);
+
+// =========================================================
+// 18. LOAD FISH 1
+// =========================================================
+loader.load(
+  BASE_URL+'fish1.glb',
+  function(gltf){
+    console.log('fish1.glb โหลดสำเร็จ!');
+
+    fish1=gltf.scene;
+    fish1StartX=fish1.position.x;
+
+    // FISH 1 = CEL SHADING
+    applyCelToModel(fish1);
+
+    mainGroup.add(fish1);
+  },
+  undefined,
+  function(error){
+    console.error('โหลด fish1.glb ไม่สำเร็จ:',error);
+  }
+);
+
+// =========================================================
+// 19. LOAD FISH 3
+// =========================================================
+loader.load(
+  BASE_URL+'fish3.glb',
+  function(gltf){
+    console.log('fish3.glb โหลดสำเร็จ!');
+
+    fish3=gltf.scene;
+    fish3StartX=fish3.position.x;
+
+    // FISH 3 = CEL SHADING
+    applyCelToModel(fish3);
+
+    mainGroup.add(fish3);
+  },
+  undefined,
+  function(error){
+    console.error('โหลด fish3.glb ไม่สำเร็จ:',error);
+  }
+);
+
+// =========================================================
+// 20. LOAD FISH 4
+// =========================================================
+loader.load(
+  BASE_URL+'fish4.glb',
+  function(gltf){
+    console.log('fish4.glb โหลดสำเร็จ!');
+
+    fish4=gltf.scene;
+    fish4StartX=fish4.position.x;
+
+    // FISH 4 = CEL SHADING
+    applyCelToModel(fish4);
+
+    mainGroup.add(fish4);
+  },
+  undefined,
+  function(error){
+    console.error('โหลด fish4.glb ไม่สำเร็จ:',error);
+  }
+);
+
+// =========================================================
+// 21. LOAD HOME
+// =========================================================
+loader.load(
+  BASE_URL+'Home.glb',
+  function(gltf){
+    console.log('Home.glb โหลดสำเร็จ!');
+
+    homeModel=gltf.scene;
+    homeModel.name='Home';
+
+    // HOME = CEL SHADING
+    applyCelToModel(homeModel);
+
+    homeModel.traverse(function(child){
+      if(child.isMesh){
+        pickables.push(child);
+      }
+    });
+
+    mainGroup.add(homeModel);
+  },
+  undefined,
+  function(error){
+    console.error('โหลด Home.glb ไม่สำเร็จ:',error);
+  }
+);
+
+// =========================================================
+// 22. LOAD BOOK
+// =========================================================
+loader.load(
+  BASE_URL+'book.glb',
+  function(gltf){
+    console.log('book.glb โหลดสำเร็จ!');
+
+    book=gltf.scene;
+    bookStartX=book.position.x;
+
+    // BOOK = CEL SHADING
+    applyCelToModel(book);
+
+    mainGroup.add(book);
+  },
+  undefined,
+  function(error){
+    console.error('โหลด book.glb ไม่สำเร็จ:',error);
+  }
+);
+
+// =========================================================
+// 23. EXR SKYBOX
+// =========================================================
+const exrSkyboxUrl='https://raw.githubusercontent.com/pornnatchaMind/pornnatchaMind.github.io/main/model%20work2/cowboy_town_saloon_1k.exr';
+
+const pmremGenerator=new THREE.PMREMGenerator(renderer);
+pmremGenerator.compileEquirectangularShader();
+
+new EXRLoader()
+  .setDataType(THREE.HalfFloatType)
+  .load(
+    exrSkyboxUrl,
+    function(texture){
+      console.log('EXR โหลดสำเร็จ!');
+
+      const skybox=pmremGenerator.fromEquirectangular(texture).texture;
+
+      scene.background=skybox;
+      scene.environment=skybox;
+
+      texture.dispose();
+      pmremGenerator.dispose();
+    },
+    undefined,
+    function(error){
+      console.warn('โหลด EXR ไม่สำเร็จ ใช้พื้นหลังสีแทน',error);
+      scene.background=new THREE.Color(0x333333);
+    }
+  );
+
+// =========================================================
+// 24. GUI
+// =========================================================
+const gui=new GUI({
+  title:'PBR + Cel Shading Control'
+});
+
+// =========================================================
+// 25. CEL SHADING GUI
+// =========================================================
+const celFolder=gui.addFolder('Cel Shading');
+
+celFolder
+  .add(celSettings,'levels',2,8,1)
+  .name('Light Levels');
+
+celFolder
+  .add(celSettings,'intensity',0,1,.05)
+  .name('Cel Intensity');
+
+celFolder
+  .add(celSettings,'ambient',0,.8,.05)
+  .name('Cel Ambient');
+
+celFolder.open();
+
+// =========================================================
+// 26. AMBIENT LIGHT GUI
+// =========================================================
+const ambientFolder=gui.addFolder('Ambient Light');
+
+ambientFolder
+  .add(ambientLight,'intensity',0,5,.1)
+  .name('Intensity');
+
+ambientFolder.open();
+
+// =========================================================
+// 27. ANIMATION
+// =========================================================
+function animate(time){
+
+  requestAnimationFrame(animate);
+
+  // ---------------------------------------------------------
+  // UPDATE CEL SHADING
+  // ---------------------------------------------------------
+  celMaterials.forEach(function(material){
+
+    if(material&&material.userData&&material.userData.celShader){
+
+      const shader=material.userData.celShader;
+
+      if(shader.uniforms.uCelLevels){
+        shader.uniforms.uCelLevels.value=celSettings.levels;
+      }
+
+      if(shader.uniforms.uCelIntensity){
+        shader.uniforms.uCelIntensity.value=celSettings.intensity;
+      }
+
+      if(shader.uniforms.uCelAmbient){
+        shader.uniforms.uCelAmbient.value=celSettings.ambient;
+      }
+    }
+  });
+
+  // ---------------------------------------------------------
+  // DOOR ANIMATION
+  // ---------------------------------------------------------
+  if(door1){
+    const doorT=Math.sin(time*.001)*.5+.5;
+
+    door1.position.x=lerp(
+      door1StartX,
+      door1StartX+5.0,
+      doorT
+    );
+  }
+
+  // ---------------------------------------------------------
+  // FISH 1 ANIMATION
+  // ---------------------------------------------------------
+  if(fish1){
+    const fish1T=Math.sin(time*.0015)*.5+.5;
+
+    fish1.position.x=lerp(
+      fish1StartX-.4,
+      fish1StartX+.6,
+      fish1T
+    );
+  }
+
+  // ---------------------------------------------------------
+  // FISH 3 ANIMATION
+  // ---------------------------------------------------------
+  if(fish3){
+    const fish3T=Math.sin(time*.001)*.5+.5;
+
+    fish3.position.x=lerp(
+      fish3StartX-1.5,
+      fish3StartX+.5,
+      fish3T
+    );
+  }
+
+  // ---------------------------------------------------------
+  // FISH 4 ANIMATION
+  // ---------------------------------------------------------
+  if(fish4){
+    const fish4T=Math.sin(time*.001)*.5+.5;
+
+    fish4.position.x=lerp(
+      fish4StartX-1.0,
+      fish4StartX+.8,
+      fish4T
+    );
+  }
+
+  // ---------------------------------------------------------
+  // BOOK ANIMATION
+  // ---------------------------------------------------------
+  if(book){
+    const bookT=Math.sin(time*.002)*.5+.5;
+
+    book.position.x=lerp(
+      bookStartX-.2,
+      bookStartX+4.0,
+      bookT
+    );
+  }
+
+  // ---------------------------------------------------------
+  // PICKING CAMERA + ZOOM
+  // ---------------------------------------------------------
+  if(targetFocusPosition){
+
+    controls.target.lerp(
+      targetFocusPosition,
+      .08
+    );
+
+    if(targetCameraPosition){
+
+      camera.position.lerp(
+        targetCameraPosition,
+        .08
+      );
+    }
+  }
+
+  // ---------------------------------------------------------
+  // WATER VERTEX SHADER
+  // ---------------------------------------------------------
+  waterShaderUniforms.forEach(function(uniform){
+    uniform.value=time*.001;
+  });
+
+  // ---------------------------------------------------------
+  // UPDATE + RENDER
+  // ---------------------------------------------------------
+  controls.update();
+  renderer.render(scene,camera);
+}
+
+// =========================================================
+// 28. START
+// =========================================================
+requestAnimationFrame(animate);
+
+// =========================================================
+// 29. RESIZE
+// =========================================================
+window.addEventListener('resize',function(){
+
+  camera.aspect=
+    window.innerWidth/window.innerHeight;
+
+  camera.updateProjectionMatrix();
+
+  renderer.setSize(
+    window.innerWidth,
+    window.innerHeight
+  );
+
+  renderer.setPixelRatio(
+    Math.min(
+      window.devicePixelRatio,
+      2
+    )
+  );
+
+});
+
+</script>
+</body>
+</html>
